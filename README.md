@@ -1,6 +1,7 @@
 # TestLLVM
 
-Minimal LLVM experiment: a small BASIC-style compiler that emits LLVM IR.
+Minimal LLVM experiment: a small BASIC-style compiler that emits LLVM IR,
+Linux ELF executables, or Windows PE64 console executables.
 
 The language uses labels instead of line numbers and supports:
 
@@ -14,6 +15,9 @@ The language uses labels instead of line numbers and supports:
 Variables ending in `$` are strings. Other variables are 32-bit integers.
 String expressions support concatenation with `+`; integer expressions support
 `+`, `-`, `*`, and `/`.
+
+Comments may be written with `REM` at the start of a line, or with `'` after
+code. Labels are written as `NAME:` on their own line.
 
 ## Example
 
@@ -38,6 +42,13 @@ DONE:
 
 ## Build
 
+Requirements:
+
+- CMake 3.20 or newer
+- Ninja
+- LLVM/Clang 20 or newer
+- MinGW-w64 x86-64 tools, only when generating Windows PE64 executables
+
 ```sh
 cmake -S . -B build -G Ninja \
   -DCMAKE_C_COMPILER=clang-20 \
@@ -47,13 +58,16 @@ cmake -S . -B build -G Ninja \
 cmake --build build
 ```
 
-The build creates two compiler driver names:
+The build creates two Linux-hosted compiler driver names:
 
-- `build/basicc` defaults to Linux x86-64/native output.
-- `build/basiccw` also runs on Linux, but defaults to Windows PE x86-64
-  output.
+- `build/basicc` defaults to LLVM IR for the host/Linux target.
+- `build/basiccw` defaults to a Windows PE64 x86-64 executable.
 
-## Generate and Run
+Both drivers accept the same options. The `basiccw` name is a convenience
+wrapper around the same compiler binary; it selects `--target=win64 --emit=exe`
+by default.
+
+## Generate LLVM IR
 
 Generate LLVM IR:
 
@@ -67,16 +81,31 @@ Generate optimized LLVM IR:
 ./build/basicc examples/greeting.bas -o /tmp/greeting.ll --emit=llvm -O2
 ```
 
-Compile the generated IR with the tiny runtime:
+You can also generate Windows-targeted LLVM IR:
 
 ```sh
-clang-20 /tmp/greeting.ll runtime/basic_runtime.c -o /tmp/greeting
+./build/basiccw examples/greeting.bas -o /tmp/greeting-win.ll --emit=llvm -O2
 ```
 
-Or ask `basicc` to generate a native executable directly:
+## Generate Linux ELF
+
+Ask `basicc` to generate a native Linux ELF executable directly:
 
 ```sh
 ./build/basicc examples/greeting.bas -o /tmp/greeting --emit=exe -O2
+```
+
+Equivalent explicit form:
+
+```sh
+./build/basicc examples/greeting.bas -o /tmp/greeting \
+  --emit=exe --target=linux64 -O2
+```
+
+The generated file should be an ELF x86-64 executable:
+
+```sh
+file /tmp/greeting
 ```
 
 Run it:
@@ -96,7 +125,7 @@ HELLO, Ada
 DONE
 ```
 
-## Windows PE64 Output
+## Generate Windows PE64
 
 Install the MinGW-w64 x86-64 cross toolchain on Ubuntu:
 
@@ -126,6 +155,15 @@ file /tmp/greeting-win.exe
 `build/basiccw` is a Linux-hosted cross-compiler driver. Copy the generated
 program, such as `/tmp/greeting-win.exe`, to Windows, not `build/basiccw`.
 
+## Manual LLVM IR Linking
+
+When using `--emit=llvm`, the output is a standalone LLVM IR file for the
+generated BASIC program. To run it, link it with the tiny runtime:
+
+```sh
+clang-20 /tmp/greeting.ll runtime/basic_runtime.c -o /tmp/greeting
+```
+
 ## Compiler Options
 
 ```text
@@ -140,3 +178,10 @@ basicc input.bas -o output [--emit=llvm|exe] [--target=linux64|win64] [-O0|-O1|-
 - `-O0` disables LLVM optimization passes. This is the default.
 - `-O1`, `-O2`, and `-O3` run LLVM's standard optimization pipelines before
   writing IR or linking an executable.
+
+Driver defaults:
+
+```text
+basicc   input.bas -o output   # same as --emit=llvm --target=linux64 -O0
+basiccw  input.bas -o output   # same as --emit=exe  --target=win64   -O0
+```
