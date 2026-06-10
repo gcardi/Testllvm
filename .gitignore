@@ -1,11 +1,57 @@
+.DS_Store
+
 # Build / OS files
 build/
+build-*/
+out/
+bin/
+lib/
+lib64/
+Debug/
+Release/
+install/
 *.o
 *.obj
 *.exe
 *.out
-.vscode/
-.DS_Store
+*.elf
+*.so
+*.so.*
+*.a
+*.lib
+*.dll
+*.dylib
 
-# Git
-.git/
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+cmake-build-*/
+
+# Ninja
+build.ninja
+.ninja_log
+
+# Meson
+meson-logs/
+
+# LLVM/Clang
+*.profraw
+*.profdata
+
+# IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Editor temp files
+*~
+*.swp
+*.tmp
+
+# Logs
+*.log
+.cache/
+
