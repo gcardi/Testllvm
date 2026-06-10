@@ -1,0 +1,11 @@
+# Build / OS files
+build/
+*.o
+*.obj
+*.exe
+*.out
+.vscode/
+.DS_Store
+
+# Git
+.git/
