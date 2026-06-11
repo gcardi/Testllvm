@@ -61,10 +61,10 @@ cmake --build build
 The build creates two Linux-hosted compiler driver names:
 
 - `build/basicc` defaults to LLVM IR for the host/Linux target.
-- `build/basiccw` defaults to a Windows PE64 x86-64 executable.
+- `build/basiccw` defaults to a Windows x86-64 COFF object file.
 
 Both drivers accept the same options. The `basiccw` name is a convenience
-wrapper around the same compiler binary; it selects `--target=win64 --emit=exe`
+wrapper around the same compiler binary; it selects `--target=win64 --emit=obj`
 by default.
 
 ## Generate LLVM IR
@@ -125,7 +125,43 @@ HELLO, Ada
 DONE
 ```
 
-## Generate Windows PE64
+## Generate Object Files
+
+Ask `basicc` to generate a relocatable Linux ELF object:
+
+```sh
+./build/basicc examples/greeting.bas -o /tmp/greeting.o --emit=obj -O2
+```
+
+Ask `basiccw` to generate a Windows x86-64 COFF object:
+
+```sh
+./build/basiccw examples/greeting.bas -o /tmp/greeting.obj -O2
+```
+
+The generated object contains the BASIC program and the BASIC runtime helpers.
+It still leaves standard C library symbols such as `printf`, `malloc`, `scanf`,
+and `getchar` unresolved for the final link step.
+
+On a Debian/Ubuntu x86-64 system with static glibc and GCC runtime objects
+installed, link the object into a static Linux executable with LLD:
+
+```sh
+ld.lld-20 -static -o /tmp/greeting-static \
+  /usr/lib/x86_64-linux-gnu/crt1.o \
+  /usr/lib/x86_64-linux-gnu/crti.o \
+  /usr/lib/gcc/x86_64-linux-gnu/13/crtbeginT.o \
+  /tmp/greeting.o \
+  --start-group \
+  /usr/lib/x86_64-linux-gnu/libc.a \
+  /usr/lib/gcc/x86_64-linux-gnu/13/libgcc.a \
+  /usr/lib/gcc/x86_64-linux-gnu/13/libgcc_eh.a \
+  --end-group \
+  /usr/lib/gcc/x86_64-linux-gnu/13/crtend.o \
+  /usr/lib/x86_64-linux-gnu/crtn.o
+```
+
+## Generate Windows Object
 
 Install the MinGW-w64 x86-64 cross toolchain on Ubuntu:
 
@@ -133,46 +169,71 @@ Install the MinGW-w64 x86-64 cross toolchain on Ubuntu:
 sudo apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64
 ```
 
-Then generate a Windows console executable:
+Then generate a Windows COFF object:
 
 ```sh
-./build/basiccw examples/greeting.bas -o /tmp/greeting-win.exe -O2
+./build/basiccw examples/greeting.bas -o /tmp/greeting-win.obj -O2
 ```
 
 Equivalent explicit form:
 
 ```sh
-./build/basicc examples/greeting.bas -o /tmp/greeting-win.exe \
-  --emit=exe --target=win64 -O2
+./build/basicc examples/greeting.bas -o /tmp/greeting-win.obj \
+  --emit=obj --target=win64 -O2
 ```
 
-The generated file should be a PE32+ x86-64 executable:
+The generated file should be a COFF x86-64 object:
+
+```sh
+file /tmp/greeting-win.obj
+```
+
+`build/basiccw` is a Linux-hosted cross-compiler driver. Link the generated
+object with a Windows x86-64 C runtime to produce the final PE executable.
+
+Using the MinGW-w64 POSIX runtime installed by Debian/Ubuntu packages, link the
+COFF object into a Windows console executable with LLD:
+
+```sh
+ld.lld-20 -m i386pep -o /tmp/greeting-win.exe \
+  /usr/x86_64-w64-mingw32/lib/crt2.o \
+  /usr/lib/gcc/x86_64-w64-mingw32/13-posix/crtbegin.o \
+  /tmp/greeting-win.obj \
+  -L/usr/lib/gcc/x86_64-w64-mingw32/13-posix \
+  -L/usr/x86_64-w64-mingw32/lib \
+  --start-group \
+  -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt \
+  -lkernel32 -luser32 -ladvapi32 -lshell32 \
+  --end-group \
+  /usr/lib/gcc/x86_64-w64-mingw32/13-posix/crtend.o
+```
+
+The generated file should be a PE32+ x86-64 console executable:
 
 ```sh
 file /tmp/greeting-win.exe
 ```
 
-`build/basiccw` is a Linux-hosted cross-compiler driver. Copy the generated
-program, such as `/tmp/greeting-win.exe`, to Windows, not `build/basiccw`.
-
 ## Manual LLVM IR Linking
 
-When using `--emit=llvm`, the output is a standalone LLVM IR file for the
-generated BASIC program. To run it, link it with the tiny runtime:
+When using `--emit=llvm`, the output is a standalone LLVM IR file containing
+the generated BASIC program and the BASIC runtime helpers. To run it, link it
+with libc:
 
 ```sh
-clang-20 /tmp/greeting.ll runtime/basic_runtime.c -o /tmp/greeting
+clang-20 /tmp/greeting.ll -o /tmp/greeting
 ```
 
 ## Compiler Options
 
 ```text
-basicc input.bas -o output [--emit=llvm|exe] [--target=linux64|win64] [-O0|-O1|-O2|-O3]
+basicc input.bas -o output [--emit=llvm|obj|exe] [--target=linux64|win64] [-O0|-O1|-O2|-O3]
 ```
 
 - `--emit=llvm` writes LLVM IR. This is the default.
+- `--emit=obj` writes a relocatable object file directly through LLVM.
 - `--emit=exe` writes a native executable by linking the generated IR with
-  `runtime/basic_runtime.c` through `clang-20`.
+  `clang-20`.
 - `--target=linux64` targets the host x86-64 Linux toolchain.
 - `--target=win64` targets `x86_64-w64-windows-gnu` and requires MinGW-w64.
 - `-O0` disables LLVM optimization passes. This is the default.
@@ -183,5 +244,5 @@ Driver defaults:
 
 ```text
 basicc   input.bas -o output   # same as --emit=llvm --target=linux64 -O0
-basiccw  input.bas -o output   # same as --emit=exe  --target=win64   -O0
+basiccw  input.bas -o output   # same as --emit=obj  --target=win64   -O0
 ```
