@@ -3,11 +3,14 @@
 Minimal LLVM experiment: a small BASIC-style compiler that emits LLVM IR,
 Linux ELF executables, or Windows PE64 console executables.
 
+Note: This project is nothing more than a toy. It’s just a tiny, useless demo showing how easy it is to implement a real optimizing compiler using the LLVM framework (and a little help from an LLM). 
+
 The language uses labels instead of line numbers and supports:
 
 - `LET name = expression`
 - `INPUT name`
 - `PRINT expression`
+- `IF expression <op> expression THEN statement [ELSE statement]`
 - `IF expression <op> expression GOTO LABEL`
 - `GOTO LABEL`
 - `END`
@@ -18,6 +21,48 @@ String expressions support concatenation with `+`; integer expressions support
 
 Comments may be written with `REM` at the start of a line, or with `'` after
 code. Labels are written as `NAME:` on their own line.
+
+## Grammar
+
+The parser accepts one statement per line. Labels are standalone lines and apply
+to the next statement. `ELSE` binds to the nearest unmatched `IF`.
+
+```ebnf
+program        ::= { blank_line | comment_line | label_line | statement_line } ;
+
+label_line     ::= ident ":" ;
+statement_line ::= statement ;
+
+statement      ::= let_stmt
+                 | input_stmt
+                 | print_stmt
+                 | if_then_stmt
+                 | if_goto_stmt
+                 | goto_stmt
+                 | end_stmt ;
+
+let_stmt       ::= "LET" ident "=" expression ;
+input_stmt     ::= "INPUT" ident ;
+print_stmt     ::= "PRINT" expression ;
+if_then_stmt   ::= "IF" condition "THEN" statement [ "ELSE" statement ] ;
+if_goto_stmt   ::= "IF" condition "GOTO" ident ;
+goto_stmt      ::= "GOTO" ident ;
+end_stmt       ::= "END" ;
+
+condition      ::= expression comparison expression ;
+comparison     ::= "=" | "<" | ">" | "<=" | ">=" | "<>" ;
+
+expression     ::= additive ;
+additive       ::= multiplicative { ("+" | "-") multiplicative } ;
+multiplicative ::= primary { ("*" | "/") primary } ;
+primary        ::= integer
+                 | string
+                 | ident
+                 | "(" expression ")" ;
+
+comment_line   ::= "REM" ... ;
+inline_comment ::= "'" ... ;
+```
 
 ## Example
 
@@ -33,7 +78,7 @@ MAIN:
 LOOP:
   PRINT I
   LET I = I + 1
-  IF I < N GOTO LOOP
+  IF I < N THEN GOTO LOOP ELSE PRINT "COUNT COMPLETE"
 
 DONE:
   PRINT "DONE"
@@ -122,6 +167,7 @@ HELLO, Ada
 0
 1
 2
+COUNT COMPLETE
 DONE
 ```
 
