@@ -4,15 +4,19 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Program.h>
+#include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
 #include <llvm/TargetParser/Host.h>
 
 #include <cctype>
@@ -29,10 +33,6 @@
 #include <vector>
 
 namespace {
-
-#ifndef BASIC_RUNTIME_SOURCE
-#define BASIC_RUNTIME_SOURCE "runtime/basic_runtime.c"
-#endif
 
 std::string upper(std::string s) {
   for (char &c : s) {
@@ -557,6 +557,7 @@ public:
 
     builder_.SetInsertPoint(exitBlock_);
     builder_.CreateRet(llvm::ConstantInt::get(i32Ty(), 0));
+    defineRuntime();
 
     if (llvm::verifyFunction(*main_, &llvm::errs())) {
       throw std::runtime_error("generated invalid LLVM function");
@@ -569,6 +570,8 @@ public:
 
 private:
   llvm::Type *i32Ty() { return llvm::Type::getInt32Ty(context_); }
+  llvm::Type *i64Ty() { return llvm::Type::getInt64Ty(context_); }
+  llvm::Type *i8Ty() { return llvm::Type::getInt8Ty(context_); }
   llvm::Type *voidTy() { return llvm::Type::getVoidTy(context_); }
   llvm::PointerType *ptrTy() { return llvm::PointerType::get(context_, 0); }
 
@@ -600,6 +603,196 @@ private:
     auto *type = llvm::FunctionType::get(ret, args, false);
     return llvm::Function::Create(type, llvm::Function::ExternalLinkage, name,
                                   module_.get());
+  }
+
+  llvm::Function *declareVarArg(const std::string &name, llvm::Type *ret,
+                                std::vector<llvm::Type *> args) {
+    auto *type = llvm::FunctionType::get(ret, args, true);
+    return llvm::Function::Create(type, llvm::Function::ExternalLinkage, name,
+                                  module_.get());
+  }
+
+  llvm::Function *getFunction(const std::string &name, llvm::Type *ret,
+                              std::vector<llvm::Type *> args,
+                              bool varArg = false) {
+    if (auto *fn = module_->getFunction(name)) {
+      return fn;
+    }
+    return varArg ? declareVarArg(name, ret, std::move(args))
+                  : declare(name, ret, std::move(args));
+  }
+
+  llvm::Value *cString(const std::string &text, const std::string &name) {
+    return builder_.CreateGlobalString(text, name);
+  }
+
+  void emitExitIfNull(llvm::Value *ptr, llvm::Function *exitFn,
+                      llvm::BasicBlock *okBlock) {
+    llvm::Function *fn = builder_.GetInsertBlock()->getParent();
+    llvm::BasicBlock *failBlock = llvm::BasicBlock::Create(context_, "oom", fn);
+    builder_.CreateCondBr(builder_.CreateICmpEQ(ptr, llvm::ConstantPointerNull::get(ptrTy())),
+                          failBlock, okBlock);
+    builder_.SetInsertPoint(failBlock);
+    builder_.CreateCall(exitFn, {llvm::ConstantInt::get(i32Ty(), 1)});
+    builder_.CreateUnreachable();
+    builder_.SetInsertPoint(okBlock);
+  }
+
+  llvm::Function *defineStrdup(llvm::Function *strlenFn, llvm::Function *mallocFn,
+                               llvm::Function *memcpyFn, llvm::Function *exitFn) {
+    auto *fnTy = llvm::FunctionType::get(ptrTy(), {ptrTy()}, false);
+    auto *fn = llvm::Function::Create(fnTy, llvm::Function::InternalLinkage,
+                                      "basic_strdup", module_.get());
+    llvm::Argument *arg = fn->getArg(0);
+    arg->setName("s");
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context_, "entry", fn);
+    llvm::BasicBlock *haveMemory = llvm::BasicBlock::Create(context_, "have_memory", fn);
+    builder_.SetInsertPoint(entry);
+
+    llvm::Value *empty = cString("", "rt.empty");
+    llvm::Value *isNull =
+        builder_.CreateICmpEQ(arg, llvm::ConstantPointerNull::get(ptrTy()));
+    llvm::Value *selected = builder_.CreateSelect(isNull, empty, arg);
+
+    llvm::Value *n = builder_.CreateCall(strlenFn, {selected}, "n");
+    llvm::Value *bytes =
+        builder_.CreateAdd(n, llvm::ConstantInt::get(i64Ty(), 1), "bytes");
+    llvm::Value *copy = builder_.CreateCall(mallocFn, {bytes}, "copy");
+    emitExitIfNull(copy, exitFn, haveMemory);
+    builder_.CreateCall(memcpyFn, {copy, selected, bytes});
+    builder_.CreateRet(copy);
+    return fn;
+  }
+
+  void defineRuntime() {
+    llvm::Function *strlenFn = getFunction("strlen", i64Ty(), {ptrTy()});
+    llvm::Function *mallocFn = getFunction("malloc", ptrTy(), {i64Ty()});
+    llvm::Function *memcpyFn =
+        getFunction("memcpy", ptrTy(), {ptrTy(), ptrTy(), i64Ty()});
+    llvm::Function *exitFn = getFunction("exit", voidTy(), {i32Ty()});
+    llvm::Function *scanfFn = getFunction("scanf", i32Ty(), {ptrTy()}, true);
+    llvm::Function *getcharFn = getFunction("getchar", i32Ty(), {});
+    llvm::Function *printfFn = getFunction("printf", i32Ty(), {ptrTy()}, true);
+
+    llvm::Function *strdupFn = defineStrdup(strlenFn, mallocFn, memcpyFn, exitFn);
+    defineInputI32(scanfFn, exitFn);
+    defineInputString(getcharFn, strdupFn);
+    defineConcat(strlenFn, mallocFn, memcpyFn, exitFn);
+    definePrintI32(printfFn);
+    definePrintString(printfFn);
+  }
+
+  void defineInputI32(llvm::Function *scanfFn, llvm::Function *exitFn) {
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context_, "entry", inputI32_);
+    llvm::BasicBlock *ok = llvm::BasicBlock::Create(context_, "ok", inputI32_);
+    llvm::BasicBlock *fail = llvm::BasicBlock::Create(context_, "fail", inputI32_);
+    builder_.SetInsertPoint(entry);
+    llvm::Value *slot = builder_.CreateAlloca(i32Ty(), nullptr, "value");
+    builder_.CreateStore(llvm::ConstantInt::get(i32Ty(), 0), slot);
+    llvm::Value *fmt = cString("%d", "rt.scan_int");
+    llvm::Value *read = builder_.CreateCall(scanfFn, {fmt, slot}, "read");
+    builder_.CreateCondBr(
+        builder_.CreateICmpEQ(read, llvm::ConstantInt::get(i32Ty(), 1)), ok, fail);
+
+    builder_.SetInsertPoint(fail);
+    builder_.CreateCall(exitFn, {llvm::ConstantInt::get(i32Ty(), 1)});
+    builder_.CreateUnreachable();
+
+    builder_.SetInsertPoint(ok);
+    builder_.CreateRet(builder_.CreateLoad(i32Ty(), slot));
+  }
+
+  void defineInputString(llvm::Function *getcharFn, llvm::Function *strdupFn) {
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(context_, "entry", inputString_);
+    llvm::BasicBlock *loop = llvm::BasicBlock::Create(context_, "loop", inputString_);
+    llvm::BasicBlock *storeChar =
+        llvm::BasicBlock::Create(context_, "store_char", inputString_);
+    llvm::BasicBlock *done = llvm::BasicBlock::Create(context_, "done", inputString_);
+
+    builder_.SetInsertPoint(entry);
+    auto *bufferTy = llvm::ArrayType::get(i8Ty(), 1024);
+    llvm::Value *buffer = builder_.CreateAlloca(bufferTy, nullptr, "buffer");
+    llvm::Value *indexSlot = builder_.CreateAlloca(i64Ty(), nullptr, "index");
+    builder_.CreateStore(llvm::ConstantInt::get(i64Ty(), 0), indexSlot);
+    llvm::Value *bufferPtr = builder_.CreateInBoundsGEP(
+        bufferTy, buffer,
+        {llvm::ConstantInt::get(i32Ty(), 0), llvm::ConstantInt::get(i32Ty(), 0)});
+    builder_.CreateBr(loop);
+
+    builder_.SetInsertPoint(loop);
+    llvm::Value *ch = builder_.CreateCall(getcharFn, {}, "ch");
+    llvm::Value *index = builder_.CreateLoad(i64Ty(), indexSlot, "index.load");
+    llvm::Value *isEof =
+        builder_.CreateICmpEQ(ch, llvm::ConstantInt::get(i32Ty(), -1));
+    llvm::Value *isNewline =
+        builder_.CreateICmpEQ(ch, llvm::ConstantInt::get(i32Ty(), '\n'));
+    llvm::Value *isFull =
+        builder_.CreateICmpUGE(index, llvm::ConstantInt::get(i64Ty(), 1023));
+    llvm::Value *stop = builder_.CreateOr(builder_.CreateOr(isEof, isNewline), isFull);
+    builder_.CreateCondBr(stop, done, storeChar);
+
+    builder_.SetInsertPoint(storeChar);
+    llvm::Value *charPtr = builder_.CreateInBoundsGEP(i8Ty(), bufferPtr, index);
+    builder_.CreateStore(builder_.CreateTrunc(ch, i8Ty()), charPtr);
+    builder_.CreateStore(
+        builder_.CreateAdd(index, llvm::ConstantInt::get(i64Ty(), 1)), indexSlot);
+    builder_.CreateBr(loop);
+
+    builder_.SetInsertPoint(done);
+    llvm::Value *finalIndex = builder_.CreateLoad(i64Ty(), indexSlot);
+    llvm::Value *nulPtr = builder_.CreateInBoundsGEP(i8Ty(), bufferPtr, finalIndex);
+    builder_.CreateStore(llvm::ConstantInt::get(i8Ty(), 0), nulPtr);
+    builder_.CreateRet(builder_.CreateCall(strdupFn, {bufferPtr}));
+  }
+
+  void defineConcat(llvm::Function *strlenFn, llvm::Function *mallocFn,
+                    llvm::Function *memcpyFn, llvm::Function *exitFn) {
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context_, "entry", concat_);
+    llvm::BasicBlock *haveMemory = llvm::BasicBlock::Create(context_, "have_memory", concat_);
+    builder_.SetInsertPoint(entry);
+    llvm::Argument *aArg = concat_->getArg(0);
+    llvm::Argument *bArg = concat_->getArg(1);
+    llvm::Value *empty = cString("", "rt.concat_empty");
+    llvm::Value *a = builder_.CreateSelect(
+        builder_.CreateICmpEQ(aArg, llvm::ConstantPointerNull::get(ptrTy())), empty,
+        aArg);
+    llvm::Value *b = builder_.CreateSelect(
+        builder_.CreateICmpEQ(bArg, llvm::ConstantPointerNull::get(ptrTy())), empty,
+        bArg);
+    llvm::Value *an = builder_.CreateCall(strlenFn, {a}, "an");
+    llvm::Value *bn = builder_.CreateCall(strlenFn, {b}, "bn");
+    llvm::Value *total =
+        builder_.CreateAdd(builder_.CreateAdd(an, bn), llvm::ConstantInt::get(i64Ty(), 1));
+    llvm::Value *out = builder_.CreateCall(mallocFn, {total}, "out");
+    emitExitIfNull(out, exitFn, haveMemory);
+    builder_.CreateCall(memcpyFn, {out, a, an});
+    llvm::Value *tail = builder_.CreateInBoundsGEP(i8Ty(), out, an);
+    llvm::Value *bnWithNul =
+        builder_.CreateAdd(bn, llvm::ConstantInt::get(i64Ty(), 1));
+    builder_.CreateCall(memcpyFn, {tail, b, bnWithNul});
+    builder_.CreateRet(out);
+  }
+
+  void definePrintI32(llvm::Function *printfFn) {
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context_, "entry", printI32_);
+    builder_.SetInsertPoint(entry);
+    builder_.CreateCall(printfFn, {cString("%d\n", "rt.print_int"), printI32_->getArg(0)});
+    builder_.CreateRetVoid();
+  }
+
+  void definePrintString(llvm::Function *printfFn) {
+    llvm::BasicBlock *entry =
+        llvm::BasicBlock::Create(context_, "entry", printString_);
+    builder_.SetInsertPoint(entry);
+    llvm::Value *empty = cString("", "rt.print_empty");
+    llvm::Value *value = builder_.CreateSelect(
+        builder_.CreateICmpEQ(printString_->getArg(0),
+                              llvm::ConstantPointerNull::get(ptrTy())),
+        empty, printString_->getArg(0));
+    builder_.CreateCall(printfFn, {cString("%s\n", "rt.print_string"), value});
+    builder_.CreateRetVoid();
   }
 
   void buildLabelMap(const std::vector<llvm::BasicBlock *> &blocks) {
@@ -860,6 +1053,58 @@ void optimizeModule(llvm::Module &module, int level) {
   modulePM.run(module, moduleAM);
 }
 
+void initializeLLVMTargets() {
+  static bool initialized = false;
+  if (initialized) {
+    return;
+  }
+  if (llvm::InitializeNativeTarget()) {
+    throw std::runtime_error("cannot initialize native LLVM target");
+  }
+  if (llvm::InitializeNativeTargetAsmPrinter()) {
+    throw std::runtime_error("cannot initialize native LLVM asm printer");
+  }
+  initialized = true;
+}
+
+void writeObjectFile(llvm::Module &module, const std::string &path,
+                     TargetKind target) {
+  initializeLLVMTargets();
+
+  std::string triple = targetTriple(target);
+  module.setTargetTriple(triple);
+
+  std::string error;
+  const llvm::Target *targetInfo =
+      llvm::TargetRegistry::lookupTarget(triple, error);
+  if (!targetInfo) {
+    throw std::runtime_error("cannot find LLVM target for '" + triple + "': " +
+                             error);
+  }
+
+  llvm::TargetOptions options;
+  std::unique_ptr<llvm::TargetMachine> machine(targetInfo->createTargetMachine(
+      triple, "generic", "", options, llvm::Reloc::PIC_));
+  if (!machine) {
+    throw std::runtime_error("cannot create target machine for '" + triple + "'");
+  }
+
+  module.setDataLayout(machine->createDataLayout());
+
+  std::error_code ec;
+  llvm::raw_fd_ostream out(path, ec, llvm::sys::fs::OF_None);
+  if (ec) {
+    throw std::runtime_error("cannot open object output file: " + ec.message());
+  }
+
+  llvm::legacy::PassManager pass;
+  if (machine->addPassesToEmitFile(pass, out, nullptr,
+                                   llvm::CodeGenFileType::ObjectFile)) {
+    throw std::runtime_error("LLVM target cannot emit object files");
+  }
+  pass.run(module);
+}
+
 void writeTempModule(llvm::Module &module, std::string &path) {
   llvm::SmallString<128> tempPath;
   int fd = -1;
@@ -886,13 +1131,12 @@ void writeExecutable(llvm::Module &module, const std::string &path, int optLevel
   }
 
   std::string clangPath = *clang;
-  std::string runtime = BASIC_RUNTIME_SOURCE;
   std::string outputFlag = "-o";
   std::string optFlag = "-O" + std::to_string(optLevel);
   std::string targetFlag =
       target == TargetKind::Win64 ? "--target=x86_64-w64-windows-gnu"
                                   : "--target=" + llvm::sys::getDefaultTargetTriple();
-  std::vector<llvm::StringRef> args = {clangPath, targetFlag, tempIR, runtime,
+  std::vector<llvm::StringRef> args = {clangPath, targetFlag, tempIR,
                                        outputFlag, path, optFlag};
 
   int result = llvm::sys::ExecuteAndWait(clangPath, args);
@@ -905,14 +1149,14 @@ void writeExecutable(llvm::Module &module, const std::string &path, int optLevel
 struct Options {
   std::string input;
   std::string output;
-  bool emitExecutable = false;
+  enum class EmitKind { LLVM, Object, Executable } emit = EmitKind::LLVM;
   int optLevel = 0;
   TargetKind target = TargetKind::Linux64;
 };
 
 void usage(const char *argv0) {
   std::cerr << "usage: " << argv0
-            << " input.bas -o output [--emit=llvm|exe] [--target=linux64|win64]"
+            << " input.bas -o output [--emit=llvm|obj|exe] [--target=linux64|win64]"
                " [-O0|-O1|-O2|-O3]\n";
 }
 
@@ -926,7 +1170,7 @@ Options parseOptions(int argc, char **argv) {
   std::string driver = argv[0];
   if (driver.find("basiccw") != std::string::npos) {
     options.target = TargetKind::Win64;
-    options.emitExecutable = true;
+    options.emit = Options::EmitKind::Object;
   }
 
   options.input = argv[1];
@@ -938,9 +1182,11 @@ Options parseOptions(int argc, char **argv) {
       }
       options.output = argv[++i];
     } else if (arg == "--emit=llvm") {
-      options.emitExecutable = false;
+      options.emit = Options::EmitKind::LLVM;
+    } else if (arg == "--emit=obj") {
+      options.emit = Options::EmitKind::Object;
     } else if (arg == "--emit=exe") {
-      options.emitExecutable = true;
+      options.emit = Options::EmitKind::Executable;
     } else if (arg == "--target=linux64") {
       options.target = TargetKind::Linux64;
     } else if (arg == "--target=win64") {
@@ -974,8 +1220,10 @@ int main(int argc, char **argv) {
     IRGenerator generator(parser.parse(), targetTriple(options.target));
     std::unique_ptr<llvm::Module> module = generator.generate();
     optimizeModule(*module, options.optLevel);
-    if (options.emitExecutable) {
+    if (options.emit == Options::EmitKind::Executable) {
       writeExecutable(*module, options.output, options.optLevel, options.target);
+    } else if (options.emit == Options::EmitKind::Object) {
+      writeObjectFile(*module, options.output, options.target);
     } else {
       writeModule(*module, options.output);
     }

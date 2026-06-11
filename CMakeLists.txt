@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(TestLLVMBasic LANGUAGES C CXX)
+project(TestLLVMBasic LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,25 +21,25 @@ add_executable(basicc
 target_include_directories(basicc PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(basicc PRIVATE
   ${LLVM_DEFINITIONS}
-  BASIC_RUNTIME_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/runtime/basic_runtime.c"
 )
 
 llvm_map_components_to_libnames(LLVM_LIBS
   Analysis
+  AsmPrinter
+  CodeGen
   Core
   InstCombine
+  MC
   Passes
   Support
+  Target
   TransformUtils
+  X86CodeGen
+  X86Desc
+  X86Info
 )
 
 target_link_libraries(basicc PRIVATE ${LLVM_LIBS})
-
-add_library(basic_runtime STATIC
-  runtime/basic_runtime.c
-)
-
-target_include_directories(basic_runtime PUBLIC runtime)
 
 add_custom_command(
   OUTPUT ${CMAKE_BINARY_DIR}/basiccw
