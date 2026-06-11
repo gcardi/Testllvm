@@ -172,20 +172,20 @@ sudo apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x8
 Then generate a Windows COFF object:
 
 ```sh
-./build/basiccw examples/greeting.bas -o /tmp/greeting-win.obj -O2
+./build/basiccw examples/greeting.bas -o /tmp/greeting.obj -O2
 ```
 
 Equivalent explicit form:
 
 ```sh
-./build/basicc examples/greeting.bas -o /tmp/greeting-win.obj \
+./build/basicc examples/greeting.bas -o /tmp/greeting.obj \
   --emit=obj --target=win64 -O2
 ```
 
 The generated file should be a COFF x86-64 object:
 
 ```sh
-file /tmp/greeting-win.obj
+file /tmp/greeting.obj
 ```
 
 `build/basiccw` is a Linux-hosted cross-compiler driver. Link the generated
@@ -198,7 +198,7 @@ COFF object into a Windows console executable with LLD:
 ld.lld-20 -m i386pep -o /tmp/greeting-win.exe \
   /usr/x86_64-w64-mingw32/lib/crt2.o \
   /usr/lib/gcc/x86_64-w64-mingw32/13-posix/crtbegin.o \
-  /tmp/greeting-win.obj \
+  /tmp/greeting.obj \
   -L/usr/lib/gcc/x86_64-w64-mingw32/13-posix \
   -L/usr/x86_64-w64-mingw32/lib \
   --start-group \
