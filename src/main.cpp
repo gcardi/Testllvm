@@ -233,7 +233,7 @@ struct Expr {
   std::unique_ptr<Expr> rhs;
 };
 
-enum class StmtKind { Let, Input, Print, IfGoto, Goto, End };
+enum class StmtKind { Let, Input, Print, IfGoto, IfThen, Goto, End };
 
 struct Stmt {
   StmtKind kind;
@@ -244,6 +244,8 @@ struct Stmt {
   TokenKind compare = TokenKind::End;
   std::unique_ptr<Expr> expr;
   std::unique_ptr<Expr> rhs;
+  std::unique_ptr<Stmt> thenBranch;
+  std::unique_ptr<Stmt> elseBranch;
 };
 
 class Parser {
@@ -277,7 +279,7 @@ public:
         continue;
       }
 
-      Stmt stmt = parseStmt();
+      Stmt stmt = parseStmt(true);
       stmt.labels = std::move(pendingLabels);
       pendingLabels.clear();
       stmts.push_back(std::move(stmt));
@@ -343,7 +345,13 @@ private:
     ++pos_;
   }
 
-  Stmt parseStmt() {
+  void finishStmt(bool consumeEnd) {
+    if (consumeEnd) {
+      consume(TokenKind::End, "end of line");
+    }
+  }
+
+  Stmt parseStmt(bool consumeEnd) {
     int line = peek().line;
     if (isKeyword("LET")) {
       consumeKeyword("LET");
@@ -351,7 +359,7 @@ private:
       stmt.name = consume(TokenKind::Ident, "variable name").text;
       consume(TokenKind::Equal, "=");
       stmt.expr = parseExpression();
-      consume(TokenKind::End, "end of line");
+      finishStmt(consumeEnd);
       return stmt;
     }
 
@@ -359,7 +367,7 @@ private:
       consumeKeyword("INPUT");
       Stmt stmt{StmtKind::Input, line};
       stmt.name = consume(TokenKind::Ident, "variable name").text;
-      consume(TokenKind::End, "end of line");
+      finishStmt(consumeEnd);
       return stmt;
     }
 
@@ -367,19 +375,32 @@ private:
       consumeKeyword("PRINT");
       Stmt stmt{StmtKind::Print, line};
       stmt.expr = parseExpression();
-      consume(TokenKind::End, "end of line");
+      finishStmt(consumeEnd);
       return stmt;
     }
 
     if (isKeyword("IF")) {
       consumeKeyword("IF");
-      Stmt stmt{StmtKind::IfGoto, line};
+      Stmt stmt{StmtKind::IfThen, line};
       stmt.expr = parseExpression();
       stmt.compare = consumeComparison();
       stmt.rhs = parseExpression();
-      consumeKeyword("GOTO");
-      stmt.target = consume(TokenKind::Ident, "label").text;
-      consume(TokenKind::End, "end of line");
+
+      if (isKeyword("GOTO")) {
+        stmt.kind = StmtKind::IfGoto;
+        consumeKeyword("GOTO");
+        stmt.target = consume(TokenKind::Ident, "label").text;
+        finishStmt(consumeEnd);
+        return stmt;
+      }
+
+      consumeKeyword("THEN");
+      stmt.thenBranch = std::make_unique<Stmt>(parseStmt(false));
+      if (isKeyword("ELSE")) {
+        consumeKeyword("ELSE");
+        stmt.elseBranch = std::make_unique<Stmt>(parseStmt(false));
+      }
+      finishStmt(consumeEnd);
       return stmt;
     }
 
@@ -387,14 +408,14 @@ private:
       consumeKeyword("GOTO");
       Stmt stmt{StmtKind::Goto, line};
       stmt.target = consume(TokenKind::Ident, "label").text;
-      consume(TokenKind::End, "end of line");
+      finishStmt(consumeEnd);
       return stmt;
     }
 
     if (isKeyword("END")) {
       consumeKeyword("END");
       Stmt stmt{StmtKind::End, line};
-      consume(TokenKind::End, "end of line");
+      finishStmt(consumeEnd);
       return stmt;
     }
 
@@ -795,6 +816,20 @@ private:
     builder_.CreateRetVoid();
   }
 
+  void validateBranches(const Stmt &stmt) {
+    if ((stmt.kind == StmtKind::Goto || stmt.kind == StmtKind::IfGoto) &&
+        labels_.find(stmt.target) == labels_.end()) {
+      throw std::runtime_error("line " + std::to_string(stmt.line) +
+                               ": unknown label '" + stmt.target + "'");
+    }
+    if (stmt.thenBranch) {
+      validateBranches(*stmt.thenBranch);
+    }
+    if (stmt.elseBranch) {
+      validateBranches(*stmt.elseBranch);
+    }
+  }
+
   void buildLabelMap(const std::vector<llvm::BasicBlock *> &blocks) {
     for (size_t i = 0; i < stmts_.size(); ++i) {
       for (const auto &label : stmts_[i].labels) {
@@ -805,11 +840,7 @@ private:
     }
 
     for (const auto &stmt : stmts_) {
-      if ((stmt.kind == StmtKind::Goto || stmt.kind == StmtKind::IfGoto) &&
-          labels_.find(stmt.target) == labels_.end()) {
-        throw std::runtime_error("line " + std::to_string(stmt.line) +
-                                 ": unknown label '" + stmt.target + "'");
-      }
+      validateBranches(stmt);
     }
   }
 
@@ -856,18 +887,28 @@ private:
     }
   }
 
+  void collectVariables(const Stmt &stmt, std::vector<std::string> &names) {
+    if (!stmt.name.empty()) {
+      names.push_back(stmt.name);
+    }
+    if (stmt.expr) {
+      collectVariables(*stmt.expr, names);
+    }
+    if (stmt.rhs) {
+      collectVariables(*stmt.rhs, names);
+    }
+    if (stmt.thenBranch) {
+      collectVariables(*stmt.thenBranch, names);
+    }
+    if (stmt.elseBranch) {
+      collectVariables(*stmt.elseBranch, names);
+    }
+  }
+
   void prepareVariables() {
     std::vector<std::string> names;
     for (const Stmt &stmt : stmts_) {
-      if (!stmt.name.empty()) {
-        names.push_back(stmt.name);
-      }
-      if (stmt.expr) {
-        collectVariables(*stmt.expr, names);
-      }
-      if (stmt.rhs) {
-        collectVariables(*stmt.rhs, names);
-      }
+      collectVariables(stmt, names);
     }
 
     for (const auto &name : names) {
@@ -981,6 +1022,29 @@ private:
     case StmtKind::IfGoto:
       builder_.CreateCondBr(emitCompare(stmt), labels_.at(stmt.target), fallthrough);
       return;
+    case StmtKind::IfThen: {
+      llvm::BasicBlock *thenBlock =
+          llvm::BasicBlock::Create(context_, "if.then", main_);
+      llvm::BasicBlock *elseBlock =
+          stmt.elseBranch ? llvm::BasicBlock::Create(context_, "if.else", main_)
+                          : fallthrough;
+      builder_.CreateCondBr(emitCompare(stmt), thenBlock, elseBlock);
+
+      builder_.SetInsertPoint(thenBlock);
+      emitStmt(*stmt.thenBranch, fallthrough);
+      if (!builder_.GetInsertBlock()->getTerminator()) {
+        builder_.CreateBr(fallthrough);
+      }
+
+      if (stmt.elseBranch) {
+        builder_.SetInsertPoint(elseBlock);
+        emitStmt(*stmt.elseBranch, fallthrough);
+        if (!builder_.GetInsertBlock()->getTerminator()) {
+          builder_.CreateBr(fallthrough);
+        }
+      }
+      return;
+    }
     case StmtKind::Goto:
       builder_.CreateBr(labels_.at(stmt.target));
       return;
